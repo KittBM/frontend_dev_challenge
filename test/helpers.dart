@@ -37,6 +37,7 @@ class FakeDealRepo extends DealRepo {
   final fetchByIdCalls = <int>[];
   final pageRequests = <int>[];
   final searchQueries = <String>[];
+  Duration fetchByIdDelay = Duration.zero;
 
   /// One completer per fetchDeals call, completed by the test.
   final pendingPages = <Completer<PagedResponseModel<DealModel>>>[];
@@ -44,6 +45,7 @@ class FakeDealRepo extends DealRepo {
   @override
   Future<DealModel> fetchById(int id) async {
     fetchByIdCalls.add(id);
+    if (fetchByIdDelay > Duration.zero) await Future.delayed(fetchByIdDelay);
     return fakeDeal(id);
   }
 

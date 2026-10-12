@@ -16,7 +16,7 @@ class _DealPage extends GetView<DealDetailsController> {
 
   @override
   Widget build(BuildContext context) =>
-      Scaffold(body: Text(controller.deal.name));
+      Scaffold(body: Text(controller.deal?.name ?? 'loading'));
 }
 
 void main() {
