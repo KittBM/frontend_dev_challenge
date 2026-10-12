@@ -15,7 +15,11 @@ class HomeController extends GetxController {
   final flashDeals = <DealModel>[].obs;
   final isLoading = true.obs;
   final todayOnly = false.obs;
-  final scrollOffset = 0.0.obs;
+
+  /// Derived from the scroll offset. Rx only notifies when the value
+  /// changes, so these fire when a threshold is crossed, not on every pixel.
+  final isScrolled = false.obs;
+  final showScrollToTop = false.obs;
 
   final scrollController = ScrollController();
   final refreshController = RefreshController();
@@ -23,6 +27,10 @@ class HomeController extends GetxController {
   int _page = 1;
   int _totalPages = 1;
   bool _isFetchingMore = false;
+
+  /// Bumped by every refresh. A page request started under an older
+  /// generation belongs to a feed that no longer exists and is dropped.
+  int _feedGeneration = 0;
 
   bool get hasMore => _page < _totalPages;
 
@@ -38,7 +46,9 @@ class HomeController extends GetxController {
   }
 
   void _onScroll() {
-    scrollOffset.value = scrollController.offset;
+    final offset = scrollController.offset;
+    isScrolled.value = offset > 4;
+    showScrollToTop.value = offset > 800;
   }
 
   Future<void> _initialLoad() async {
@@ -56,11 +66,15 @@ class HomeController extends GetxController {
   }
 
   Future<void> refreshDeals() async {
-    _page = 1;
+    final generation = ++_feedGeneration;
+    // Any in-flight loadMore is now stale; don't let it block the next one.
+    _isFetchingMore = false;
     final res = await dealRepo.fetchDeals(page: 1);
+    if (generation != _feedGeneration) return;
+    _page = 1;
     _totalPages = res.totalPages;
     deals.assignAll(res.items);
-    refreshController.refreshCompleted();
+    refreshController.refreshCompleted(resetFooterState: true);
   }
 
   Future<void> loadMore() async {
@@ -69,15 +83,18 @@ class HomeController extends GetxController {
       refreshController.loadNoData();
       return;
     }
+    final generation = _feedGeneration;
+    final nextPage = _page + 1;
     _isFetchingMore = true;
-    _page++;
     try {
-      final res = await dealRepo.fetchDeals(page: _page);
+      final res = await dealRepo.fetchDeals(page: nextPage);
+      if (generation != _feedGeneration) return;
+      _page = nextPage;
       _totalPages = res.totalPages;
       deals.addAll(res.items);
     } catch (e) {
+      if (generation != _feedGeneration) return;
       LogService.error('loadMore failed', e);
-      _page--;
     }
     _isFetchingMore = false;
     refreshController.loadComplete();
