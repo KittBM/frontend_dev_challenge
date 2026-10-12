@@ -30,4 +30,31 @@ void main() {
     expect(controller.hasSearched.value, isFalse);
     expect(controller.isLoading.value, isFalse);
   });
+
+  testWidgets('RES-101: typing quickly sends one request for the final text',
+      (tester) async {
+    final repo = FakeDealRepo();
+    final controller = SearchDealsController(dealRepo: repo);
+
+    for (final text in ['s', 'su', 'sus', 'sush', 'sushi']) {
+      controller.onQueryChanged(text);
+      await tester.pump(const Duration(milliseconds: 80));
+    }
+    await tester.pump(const Duration(seconds: 3));
+
+    expect(repo.searchQueries, ['sushi']);
+    expect(controller.results.single.name, 'result for "sushi"');
+  });
+
+  testWidgets('RES-101: no request fires after the screen closes',
+      (tester) async {
+    final repo = FakeDealRepo();
+    final controller = SearchDealsController(dealRepo: repo);
+
+    controller.onQueryChanged('sushi');
+    controller.onClose();
+    await tester.pump(const Duration(seconds: 1));
+
+    expect(repo.searchQueries, isEmpty);
+  });
 }

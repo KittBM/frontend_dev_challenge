@@ -36,6 +36,7 @@ class FakeDealRepo extends DealRepo {
 
   final fetchByIdCalls = <int>[];
   final pageRequests = <int>[];
+  final searchQueries = <String>[];
 
   /// One completer per fetchDeals call, completed by the test.
   final pendingPages = <Completer<PagedResponseModel<DealModel>>>[];
@@ -61,6 +62,7 @@ class FakeDealRepo extends DealRepo {
   /// are slower than specific ones.
   @override
   Future<List<DealModel>> search(String query) async {
+    searchQueries.add(query);
     final ms = 180 + max(0, 1200 - query.trim().length * 280).toInt();
     await Future.delayed(Duration(milliseconds: ms));
     return [fakeDeal(1, name: 'result for "$query"')];

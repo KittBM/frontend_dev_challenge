@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:get/get.dart';
 
 import '../../model/deal_model.dart';
@@ -9,6 +11,9 @@ class SearchDealsController extends GetxController {
 
   SearchDealsController({required this.dealRepo});
 
+  /// Wait for a pause in typing before hitting the backend.
+  static const debounceDuration = Duration(milliseconds: 300);
+
   final results = <DealModel>[].obs;
   final isLoading = false.obs;
   final hasSearched = false.obs;
@@ -17,9 +22,15 @@ class SearchDealsController extends GetxController {
   /// broad (short) queries are slower, so they routinely finish after the
   /// query the user actually ended up typing.
   int _latestSearchId = 0;
+  Timer? _debounce;
 
   void onQueryChanged(String query) {
-    _search(query);
+    _debounce?.cancel();
+    if (query.trim().isEmpty) {
+      _search(query); // clear immediately
+      return;
+    }
+    _debounce = Timer(debounceDuration, () => _search(query));
   }
 
   Future<void> _search(String query) async {
@@ -41,5 +52,11 @@ class SearchDealsController extends GetxController {
       LogService.error('search failed', e);
     }
     isLoading.value = false;
+  }
+
+  @override
+  void onClose() {
+    _debounce?.cancel();
+    super.onClose();
   }
 }
