@@ -30,6 +30,11 @@ void main() {
     expect(deal.rating, isNull);
     expect(deal.discountPercent, 67);
     expect(deal.isFlashSale, isFalse);
-    expect(deal.pickupWindow.start.isUtc, isTrue);
+    expect(deal.pickupWindow.start.isUtc, isFalse);
+    // Same instant, now expressed in local wall-clock time.
+    expect(
+        deal.pickupWindow.start
+            .isAtSameMomentAs(DateTime.utc(2026, 1, 1, 10, 30)),
+        isTrue);
   });
 }
