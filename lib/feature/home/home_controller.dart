@@ -24,6 +24,10 @@ class HomeController extends GetxController {
   int _totalPages = 1;
   bool _isFetchingMore = false;
 
+  /// Bumped by every refresh. A page request started under an older
+  /// generation belongs to a feed that no longer exists and is dropped.
+  int _feedGeneration = 0;
+
   bool get hasMore => _page < _totalPages;
 
   List<DealModel> get visibleDeals => todayOnly.value
@@ -56,11 +60,15 @@ class HomeController extends GetxController {
   }
 
   Future<void> refreshDeals() async {
-    _page = 1;
+    final generation = ++_feedGeneration;
+    // Any in-flight loadMore is now stale; don't let it block the next one.
+    _isFetchingMore = false;
     final res = await dealRepo.fetchDeals(page: 1);
+    if (generation != _feedGeneration) return;
+    _page = 1;
     _totalPages = res.totalPages;
     deals.assignAll(res.items);
-    refreshController.refreshCompleted();
+    refreshController.refreshCompleted(resetFooterState: true);
   }
 
   Future<void> loadMore() async {
@@ -69,15 +77,18 @@ class HomeController extends GetxController {
       refreshController.loadNoData();
       return;
     }
+    final generation = _feedGeneration;
+    final nextPage = _page + 1;
     _isFetchingMore = true;
-    _page++;
     try {
-      final res = await dealRepo.fetchDeals(page: _page);
+      final res = await dealRepo.fetchDeals(page: nextPage);
+      if (generation != _feedGeneration) return;
+      _page = nextPage;
       _totalPages = res.totalPages;
       deals.addAll(res.items);
     } catch (e) {
+      if (generation != _feedGeneration) return;
       LogService.error('loadMore failed', e);
-      _page--;
     }
     _isFetchingMore = false;
     refreshController.loadComplete();
