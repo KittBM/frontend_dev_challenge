@@ -3,6 +3,7 @@ import 'package:get/get.dart';
 
 import '../../app_config.dart';
 import '../../model/deal_model.dart';
+import '../shared_widget/flash_countdown.dart';
 import '../shared_widget/the_network_image.dart';
 import 'deal_details_controller.dart';
 
@@ -78,6 +79,10 @@ class _DealDetailsView extends GetView<DealDetailsController> {
                           )),
                     ],
                   ),
+                  if (deal.isFlashSale) ...[
+                    const SizedBox(height: 12),
+                    _FlashSaleBanner(endsAt: deal.flashSaleEndsAt!),
+                  ],
                   const SizedBox(height: 16),
                   Container(
                     padding: const EdgeInsets.all(12),
@@ -148,13 +153,56 @@ class _DealDetailsView extends GetView<DealDetailsController> {
         color: Colors.white,
         child: SizedBox(
           width: double.infinity,
-          child: FilledButton.icon(
-            onPressed: controller.addToCart,
-            icon: const Icon(Icons.add_shopping_cart),
-            label: const Text('Add to bag'),
+          child: FlashExpiryBuilder(
+            endsAt: deal.flashSaleEndsAt,
+            builder: (context, expired) => FilledButton.icon(
+              onPressed: expired ? null : controller.addToCart,
+              icon: Icon(expired
+                  ? Icons.timer_off_outlined
+                  : Icons.add_shopping_cart),
+              label: Text(expired ? 'Flash sale ended' : 'Add to bag'),
+            ),
           ),
         ),
       ),
+    );
+  }
+}
+
+class _FlashSaleBanner extends StatelessWidget {
+  final DateTime endsAt;
+
+  const _FlashSaleBanner({required this.endsAt});
+
+  @override
+  Widget build(BuildContext context) {
+    return FlashExpiryBuilder(
+      endsAt: endsAt,
+      builder: (context, expired) {
+        final color = expired ? Colors.grey.shade700 : Colors.red.shade700;
+        final style = TextStyle(
+            fontSize: 15, fontWeight: FontWeight.w600, color: color);
+        return Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          decoration: BoxDecoration(
+            color: expired ? Colors.grey.shade200 : Colors.red.shade50,
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Row(
+            children: [
+              Icon(expired ? Icons.timer_off_outlined : Icons.bolt,
+                  color: color),
+              const SizedBox(width: 8),
+              if (expired)
+                Text('Flash sale ended', style: style)
+              else ...[
+                Text('Flash sale ends in ', style: style),
+                FlashCountdownText(endsAt: endsAt, style: style),
+              ],
+            ],
+          ),
+        );
+      },
     );
   }
 }

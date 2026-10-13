@@ -3,6 +3,7 @@ import 'package:get/get.dart';
 import 'package:pull_to_refresh/pull_to_refresh.dart';
 
 import '../../app_config.dart';
+import '../../model/deal_model.dart';
 import '../../routes/routes.dart';
 import '../shared_widget/deal_card.dart';
 import '../shared_widget/shimmer_deal_card.dart';
@@ -87,6 +88,18 @@ class HomeScreen extends GetView<HomeController> {
   /// created, however many pages have been loaded.
   Widget _buildFeed() {
     final deals = controller.visibleDeals;
+    // SmartRefresher wraps the feed in a LayoutBuilder, and since Flutter 3.27
+    // any rebuild below a LayoutBuilder (e.g. a flash countdown tick) re-lays it
+    // out. Tight constraints make it a relayout boundary so that layout stops
+    // there, and the RepaintBoundary stops the repaint that follows; otherwise
+    // both climb to the route and the whole screen, app bar included, is laid
+    // out and repainted every second.
+    return RepaintBoundary(
+      child: SizedBox.expand(child: _buildRefresher(deals)),
+    );
+  }
+
+  Widget _buildRefresher(List<DealModel> deals) {
     return SmartRefresher(
       controller: controller.refreshController,
       enablePullDown: true,
