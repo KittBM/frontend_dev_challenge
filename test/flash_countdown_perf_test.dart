@@ -133,4 +133,41 @@ void main() {
     clock.onClose();
   });
 
+  testWidgets('countdowns on a covered route stop ticking until uncovered',
+      (tester) async {
+    final clock = Get.put(ClockService(now: () => now));
+    final deal = flashDeal(1, now.add(const Duration(minutes: 5)));
+    final navigator = GlobalKey<NavigatorState>();
+    // Image placeholders shimmer forever, so pumpAndSettle never settles.
+    const transition = Duration(milliseconds: 400);
+    await tester.pumpWidget(MaterialApp(
+      navigatorKey: navigator,
+      home: Scaffold(body: ListView(children: [DealCard(deal: deal)])),
+    ));
+    expect(find.text('05:00'), findsOneWidget);
+
+    navigator.currentState!
+        .push(MaterialPageRoute(builder: (_) => const Scaffold()));
+    await tester.pump(transition);
+
+    rebuilt.clear();
+    for (var i = 0; i < 3; i++) {
+      now = now.add(const Duration(seconds: 1));
+      await tester.pump(const Duration(seconds: 1));
+    }
+    expect(rebuilt.where((t) => t == 'Obx'), isEmpty,
+        reason: 'covered countdowns must not rebuild on ticks');
+
+    navigator.currentState!.pop();
+    await tester.pump();
+    // Shows the current time straight away, not the time it was covered at.
+    expect(find.text('04:57', skipOffstage: false), findsOneWidget);
+    await tester.pump(transition);
+
+    now = now.add(const Duration(seconds: 1));
+    await tester.pump(const Duration(seconds: 1));
+    expect(find.text('04:56'), findsOneWidget, reason: 'ticking again');
+
+    clock.onClose();
+  });
 }
