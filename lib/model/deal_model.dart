@@ -66,6 +66,12 @@ class DealModel {
 
   bool get isFlashSale => flashSaleEndsAt != null;
 
+  /// True once a flash deal's sale has ended; never true for regular deals.
+  bool isFlashSaleOver(DateTime now) {
+    final endsAt = flashSaleEndsAt;
+    return endsAt != null && !now.isBefore(endsAt);
+  }
+
   int get discountPercent =>
       originalPrice <= 0 ? 0 : (100 - (price / originalPrice * 100)).round();
 }
