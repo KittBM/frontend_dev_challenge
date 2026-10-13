@@ -110,6 +110,7 @@ class FlashExpiryBuilder extends StatefulWidget {
 
 class _FlashExpiryBuilderState extends State<FlashExpiryBuilder> {
   Timer? _timer;
+  Worker? _resumeWorker;
   bool _expired = false;
 
   @override
@@ -128,6 +129,7 @@ class _FlashExpiryBuilderState extends State<FlashExpiryBuilder> {
   @override
   void dispose() {
     _timer?.cancel();
+    _resumeWorker?.dispose();
     super.dispose();
   }
 
@@ -139,11 +141,21 @@ class _FlashExpiryBuilderState extends State<FlashExpiryBuilder> {
       _expired = false;
       return;
     }
-    final remaining = endsAt.difference(Get.find<ClockService>().now());
+    final clock = Get.find<ClockService>();
+    // The one-shot timer can fire late after the device slept; re-check
+    // against the wall clock whenever the app comes back.
+    _resumeWorker ??= ever(clock.resumed, (_) => _rearmAfterResume());
+    final remaining = endsAt.difference(clock.now());
     _expired = remaining <= Duration.zero;
     if (!_expired) {
       _timer = Timer(remaining, () => setState(() => _expired = true));
     }
+  }
+
+  void _rearmAfterResume() {
+    final wasExpired = _expired;
+    _arm();
+    if (_expired != wasExpired) setState(() {});
   }
 
   @override

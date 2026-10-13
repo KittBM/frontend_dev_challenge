@@ -15,8 +15,11 @@ enum AddToCartResult { added, flashSaleEnded, noStockLeft }
 /// NOTE: the starter cart is purely local — it does not reserve stock on the
 /// backend. See the "Reservations" feature task in PROBLEM.md.
 class CartService extends GetxService {
-  CartService({ClockService? clock}) : _now = clock?.now ?? DateTime.now;
+  CartService({ClockService? clock})
+      : _clock = clock,
+        _now = clock?.now ?? DateTime.now;
 
+  final ClockService? _clock;
   final DateTime Function() _now;
 
   final items = <CartItemModel>[].obs;
@@ -24,6 +27,19 @@ class CartService extends GetxService {
 
   /// One-shot timer per flash-sale line, firing when its sale ends.
   final _expiryTimers = <int, Timer>{};
+
+  Worker? _resumeWorker;
+
+  @override
+  void onInit() {
+    super.onInit();
+    final clock = _clock;
+    // After the device slept, expiry timers may fire late (see
+    // ClockService.resumed): re-check every flash line against the wall clock.
+    if (clock != null) {
+      _resumeWorker = ever(clock.resumed, (_) => _recheckFlashSales());
+    }
+  }
 
   AddToCartResult add(DealModel deal) {
     if (deal.isFlashSaleOver(_now())) {
@@ -77,6 +93,7 @@ class CartService extends GetxService {
 
   @override
   void onClose() {
+    _resumeWorker?.dispose();
     for (final timer in _expiryTimers.values) {
       timer.cancel();
     }
@@ -90,8 +107,23 @@ class CartService extends GetxService {
   void _watchFlashSale(DealModel deal) {
     final endsAt = deal.flashSaleEndsAt;
     if (endsAt == null) return;
+    _expiryTimers.remove(deal.id)?.cancel();
     _expiryTimers[deal.id] =
         Timer(endsAt.difference(_now()), () => _removeEnded([deal]));
+  }
+
+  void _recheckFlashSales() {
+    final now = _now();
+    final ended = <DealModel>[];
+    for (final item in items) {
+      if (!item.deal.isFlashSale) continue;
+      if (item.deal.isFlashSaleOver(now)) {
+        ended.add(item.deal);
+      } else {
+        _watchFlashSale(item.deal); // fresh duration from the wall clock
+      }
+    }
+    _removeEnded(ended);
   }
 
   /// Removes lines whose flash sale ended, with one notice for all of them.

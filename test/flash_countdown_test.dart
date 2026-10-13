@@ -120,4 +120,61 @@ void main() {
     clock.onClose();
   });
 
+  group('after the device slept', () {
+    // While suspended, the monotonic clock behind Dart timers stops but the
+    // wall clock keeps going. Simulate that: move `now` without pumping any
+    // fake time, so no timer fires, then bring the app back to the foreground.
+    Future<void> sleepAndResume(WidgetTester tester, Duration slept) async {
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+      now = now.add(slept);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await tester.pump();
+    }
+
+    testWidgets('cards re-check expiry and countdowns catch up on resume',
+        (tester) async {
+      final clock = Get.put(ClockService(now: () => now));
+      final ending = flashDeal(1, now.add(const Duration(minutes: 5)));
+      final running = flashDeal(2, now.add(const Duration(minutes: 30)));
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: ListView(children: [
+            DealCard(deal: ending),
+            DealCard(deal: running),
+          ]),
+        ),
+      ));
+      expect(find.text('05:00'), findsOneWidget);
+
+      await sleepAndResume(tester, const Duration(minutes: 10));
+
+      expect(find.text('EXPIRED'), findsOneWidget);
+      expect(find.text('20:00'), findsOneWidget);
+      clock.onClose();
+    });
+
+    testWidgets('the bag drops ended lines and re-arms the rest on resume',
+        (tester) async {
+      await tester.pumpWidget(const GetMaterialApp(home: Scaffold()));
+      final clock = Get.put(ClockService(now: () => now));
+      final cart = Get.put(CartService(clock: clock));
+      cart.add(flashDeal(1, now.add(const Duration(minutes: 5))));
+      cart.add(flashDeal(2, now.add(const Duration(minutes: 30))));
+
+      await sleepAndResume(tester, const Duration(minutes: 10));
+      expect(cart.items.map((i) => i.deal.id), [2]);
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(find.text('deal 1 was removed from your bag.'), findsOneWidget);
+
+      // Deal 2's timer was re-armed for the 20 minutes actually left, not the
+      // 30 it was originally set for.
+      now = now.add(const Duration(minutes: 20));
+      await tester.pump(const Duration(minutes: 20));
+      expect(cart.items, isEmpty);
+
+      await tester.pumpAndSettle(const Duration(seconds: 5));
+      cart.onClose();
+      clock.onClose();
+    });
+  });
 }
