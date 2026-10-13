@@ -92,7 +92,18 @@ class DealDetailsController extends GetxController {
   void addToCart() {
     final deal = this.deal;
     if (deal == null) return;
-    cartService.add(deal);
+    final result = cartService.add(deal);
+    if (result != AddToCartResult.added) {
+      Get.snackbar(
+        "Can't add to bag",
+        result == AddToCartResult.flashSaleEnded
+            ? 'This flash sale has ended.'
+            : 'No more of this deal is available.',
+        snackPosition: SnackPosition.BOTTOM,
+        duration: const Duration(seconds: 2),
+      );
+      return;
+    }
     Get.snackbar(
       'Added to bag',
       '${deal.name} — pick up ${deal.pickupWindow.label}',

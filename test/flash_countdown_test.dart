@@ -4,6 +4,7 @@ import 'package:get/get.dart';
 import 'package:rescu/feature/shared_widget/deal_card.dart';
 import 'package:rescu/feature/shared_widget/flash_countdown.dart';
 import 'package:rescu/model/deal_model.dart';
+import 'package:rescu/service/cart_service.dart';
 import 'package:rescu/service/clock_service.dart';
 
 import 'helpers.dart';
@@ -53,6 +54,46 @@ void main() {
       expect(formatCountdown(const Duration(milliseconds: 200)), '00:01');
       expect(formatCountdown(Duration.zero), '00:00');
       expect(formatCountdown(const Duration(seconds: -5)), '00:00');
+    });
+  });
+
+  group('CartService', () {
+    test('refuses a flash deal whose sale has ended', () {
+      final cart = CartService(clock: ClockService(now: () => now));
+      final deal = flashDeal(1, now.subtract(const Duration(seconds: 1)));
+
+      expect(cart.add(deal), AddToCartResult.flashSaleEnded);
+      expect(cart.items, isEmpty);
+    });
+
+    testWidgets('removes a flash deal from the bag when its sale ends',
+        (tester) async {
+      await tester.pumpWidget(const GetMaterialApp(home: Scaffold()));
+      final cart = CartService(clock: ClockService(now: () => now));
+      cart.add(flashDeal(1, now.add(const Duration(seconds: 5))));
+      cart.add(fakeDeal(2));
+
+      await tester.pump(const Duration(seconds: 4));
+      expect(cart.items.map((i) => i.deal.id), [1, 2]);
+
+      await tester.pump(const Duration(seconds: 1));
+      expect(cart.items.map((i) => i.deal.id), [2]);
+      expect(cart.itemCount.value, 1);
+
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(find.text('Flash sale ended'), findsOneWidget);
+      await tester.pumpAndSettle(const Duration(seconds: 5));
+    });
+
+    // testWidgets fails on any timer still pending when the test ends.
+    testWidgets('removing a flash line cancels its expiry timer',
+        (tester) async {
+      final cart = CartService(clock: ClockService(now: () => now));
+      cart.add(flashDeal(1, now.add(const Duration(minutes: 1))));
+      cart.add(flashDeal(2, now.add(const Duration(minutes: 1))));
+      cart.decrement(1);
+      cart.clear();
+      expect(cart.items, isEmpty);
     });
   });
 
