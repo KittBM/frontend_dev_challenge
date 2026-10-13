@@ -1,7 +1,8 @@
 # Rescu — Solutions
 
-All seven Part A tickets are fixed on this branch. Part B (F-1, F-2, F-3) was
-not started; see [What's next](#time-spent-and-whats-next).
+All seven Part A tickets are fixed on this branch. In Part B, F-1 (live
+flash-sale countdowns) is done and profiled on a device; F-2 and F-3 were not
+started. See [What's next](#time-spent-and-whats-next).
 
 Every fix has a regression test under `test/`. I ran each test against the
 code before its fix to check that it actually fails there. A few are guards
@@ -298,6 +299,157 @@ photos. A portrait image in a square thumbnail would be slightly soft.
 
 ---
 
+## Part B — Features
+
+### F-1 · Live flash-sale countdowns
+
+**Design.** Three pieces, each with a different update rate:
+
+1. **One shared ticker.** `ClockService` (permanent `GetxService`) owns a
+   single timer and publishes `tick`, an `Rx<DateTime>`. Each tick is
+   scheduled to land on the next wall-clock second boundary rather than
+   using `Timer.periodic`, so every countdown on screen flips in the same
+   frame and none skips or repeats a second because of drift. 100 visible
+   countdowns cost one timer, not 100. It also takes an injectable `now`, so
+   tests control time.
+2. **`FlashCountdownText`: the only thing that rebuilds every second.** An
+   `Obx` around a fixed-size `Text`, and nothing else. `formatCountdown`
+   gives `mm:ss`, or `hh:mm:ss` from one hour up, and rounds *up* so `00:00`
+   only shows once the sale has actually ended. Used in the flash rail, the
+   feed/search card badge (`FLASH SALE · 12:34`) and a banner on the details
+   page.
+3. **`FlashExpiryBuilder`: rebuilds a card exactly once.** A one-shot
+   `Timer` set for `flashSaleEndsAt` flips the card to its expired state:
+   washed out (a `foregroundDecoration`, not `Opacity`, to avoid a
+   `saveLayer`), an `EXPIRED` badge, not tappable, and on the details page
+   the button becomes a disabled "Flash sale ended". The cards themselves
+   never listen to the per-second tick. The timer is cancelled in `dispose`
+   (the RES-102 lesson), and `didUpdateWidget` re-arms it, because list
+   items are recycled and the same `State` can be handed a different deal.
+
+**The bag.** `CartService` arms a one-shot timer per flash line when it is
+added. When it fires, the line is removed and a snackbar says "Flash sale
+ended: X was removed from your bag". Removing, decrementing to zero or
+clearing the bag cancels the timer. This lives in the service, not the UI, so
+it works whether or not any countdown is on screen. `add()` also refuses an
+ended deal and now returns an `AddToCartResult` instead of `void`. Disabling
+the button is not enough: a tap can land in the same frame the sale ends.
+The details page uses the result to show "Can't add to bag". This also fixed
+an existing bug: adding beyond the remaining stock used to show "Added to
+bag" while doing nothing.
+
+**Product decisions.**
+- Expired deals **stay** in the rail and feed, greyed out, rather than
+  disappearing. A card vanishing under the user's thumb looks like a glitch,
+  and a visible "Expired" explains why the deal is gone.
+- An expired card does not open. Its page would only offer a disabled
+  button.
+- Screen readers get a stable label, "Flash sale ends at 16:26", instead of
+  the digits. A label that changes every second makes TalkBack chatter, and
+  it would also force a semantics update on every tick.
+
+**Rejected alternatives.**
+- **A `Timer.periodic` + `setState` per card** (the `PickupCountdown`
+  pattern). That means N timers, and rebuilding whole cards every second.
+  The ticket explicitly rules this out.
+- **Expiry driven by the per-second tick**, i.e. every card listening to
+  `tick` and checking `now >= endsAt`. It works, but it puts a per-card
+  subscription on the hot path for an event that happens once.
+- **`Opacity` for the expired look.** It needs a `saveLayer` per card. A
+  foreground colour wash looks the same and costs nothing.
+
+**Edge cases.**
+- **Covered routes.** Found while profiling (see Evidence). With a deal page
+  open, the home route underneath is kept alive, and its countdowns kept
+  ticking every second for nobody. `FlashCountdownText` now checks
+  `TickerMode.of(context)`: Flutter disables tickers on routes covered by an
+  opaque route, so a covered countdown shows a static value and does not
+  subscribe. Because it depends on `TickerMode`, it rebuilds and
+  resubscribes with the current time as soon as it is uncovered.
+- **Text scaling.** The fixed size is measured with the user's text scaler,
+  separately for `mm:ss` and `hh:mm:ss`. Tabular figures make every value of
+  the same shape the same width, so it is measured once per build, not per
+  tick.
+- The expiry timer fires at `endsAt` exactly, while the text updates on the
+  next second boundary, so for under a second a card can show `00:01` and
+  then switch straight to `EXPIRED`. I left that as is.
+- *Not handled: device clock skew.* Countdowns use the device's clock. If it
+  is wrong, the countdown is wrong. The server is the authority on whether
+  the sale is still on, and F-3's reservations would enforce that at
+  checkout.
+- **Device sleep.** Dart timers run on a monotonic clock, which on Android
+  does not advance while the device is suspended (screen off), but the wall
+  clock does. So a one-shot expiry timer can fire long after `endsAt`, while
+  the countdown text, which reads the wall clock, already shows `00:00`.
+  Without a fix, the card would look active and an ended line could stay in
+  the bag. `ClockService` now observes the app lifecycle. On `resumed` it
+  ticks immediately and bumps a `resumed` counter. `FlashExpiryBuilder` and
+  `CartService` then re-check against the wall clock: ended cards flip,
+  ended bag lines are removed with a single notice, and the rest are
+  re-armed for the time actually left. A test simulates the sleep by moving
+  the wall clock 10 minutes without letting any timer fire. Both resume
+  tests fail with the re-check disabled. I reasoned about the suspend
+  behaviour from how the clocks work and did not observe it on a device;
+  the fix is cheap enough to keep either way.
+
+**Evidence.** Widget tests (`test/flash_countdown_test.dart`,
+`test/flash_countdown_perf_test.dart`) count every widget rebuilt in a frame
+through `debugOnRebuildDirtyWidget`:
+
+| Scenario | What rebuilds |
+|---|---|
+| One tick, 126 countdowns on screen (120 feed cards + rail) | `Obx` ×126 and `Text` ×126. No card, `InkWell` or list |
+| One deal expires among three | That one card, once |
+| Home covered by another route, 3 ticks | Nothing. Shows the current time when uncovered |
+| Wall clock jumps 10 min with no timer firing (sleep), then resume | Ended card flips to `EXPIRED`, ended bag line removed, others re-armed |
+
+The control frame for the first test subtracts what the image placeholders'
+shimmer costs on every frame anyway.
+
+On the device: Samsung Galaxy S22+ (SM-S906E), Flutter 3.27.0, profile mode,
+thermal status 0, measured through the VM service timeline (the data DevTools
+reads). Idle on the home screen, cost per one-second tick:
+
+| Build | UI thread | Layout | Paint | Semantics |
+|---|---|---|---|---|
+| First F-1 version | 8.45 ms | 2.85 | 2.04 | 2.18 |
+| + `TickerMode`, `RepaintBoundary` around the text, stable semantics label | 8.58 ms | 3.22 | 2.30 | 2.05 |
+| + fixed-size text (relayout boundary) | 6.71 ms | 2.61 | 0.90 | 2.10 |
+| + feed made a relayout and repaint boundary (`home_screen.dart`) | **6.36 ms** | 2.66 | **0.33** | 2.28 |
+
+On every build, `profileWidgetBuilds` showed only `Obx`/`Text` rebuilding per
+tick (4–5 countdowns were on screen). The difference was in what happened
+*after* the build. With `profileRenderObjectPaints`, every tick on the first
+builds repainted ~170 render objects: the whole route, app bar included. The
+cause was not in F-1. `SmartRefresher` wraps the feed in a `LayoutBuilder`,
+and since Flutter 3.27 any dirty widget below a `LayoutBuilder` marks it for
+layout, and a laid-out render object always marks itself for paint. The
+layout climbed to the route and repainted everything. A `RepaintBoundary`
+alone did not help, because the layout still went past it. Wrapping the
+refresher in `RepaintBoundary(SizedBox.expand(...))` gives it tight
+constraints, which makes it a relayout boundary. After that, a tick lays out
+one `ClipRect` plus the countdown text and repaints ~20 objects. The same
+cost applied to *any* rebuild inside the feed, not just countdowns.
+
+Home covered by a deal page: **4.8 ms UI + 4.2 ms raster every second →
+no frames at all**.
+
+What is left per tick is ~2.6 ms of layout and ~2.2 ms of semantics. That
+much layout for five short paragraphs is out of proportion: during scrolling
+a whole frame takes ~2.9 ms. I suspect the CPU clocking down after a second
+of idle, but I have not proved it. Semantics runs at all only because this
+phone has two remote-control accessibility services enabled; a phone without
+an accessibility service skips that phase. Every tick frame is well inside
+the 16.7 ms idle budget.
+
+Scrolling the feed and the rail by hand on the final build: 337 frames at
+120 Hz (8.3 ms budget), **0 over budget**. UI p90 4.1 / p99 7.0 ms, raster
+p90 3.9 / p99 6.0 ms. This is a few seconds of manual scrolling, read from
+the timeline ring buffer (~17 s window), not the scripted A-B-B-A run used
+for RES-105. It shows there is no regression, not a precise comparison.
+
+---
+
 ## AI usage log
 
 **Tools.** I used Claude Code (in VS Code) to read the codebase against each
@@ -340,6 +492,35 @@ against the code and a failing test before changing anything.
    (the phone was on a wireless charger). Rather than picking the run that
    looked best, I reran A-B-B-A with a cool-down to thermal status 0 before
    each run; those are the numbers reported.
+6. **F-1: the same `builtOnce` trap again.** The first rebuild-counting test
+   kept only rebuilds with `builtOnce == true` and recorded nothing. In
+   Flutter 3.27 that flag only becomes true when
+   `debugPrintRebuildDirtyWidgets` is on (`framework.dart`, `rebuild()`).
+   An empty result would have "proved" that nothing rebuilds. I read the
+   framework source and counted every rebuild against a control frame
+   instead.
+7. **F-1: "it's the profiler" / "it's the heat".** The AI first put the
+   ~9 ms idle tick down to `profileWidgetBuilds` overhead. Measuring with it
+   off disproved that. Its next explanation was heat: the phone was at
+   thermal status 3 (it had been on the wireless charger again), and after
+   cooling, the same build measured 3.5 ms on a different screen. Back on
+   the home screen with a cool phone it was still 8.45 ms. The real cause
+   was structural (see F-1 Evidence). I only found it because I kept
+   comparing the same screen in the same thermal state.
+8. **F-1: two wrong fixes before the right one.** The AI predicted that a
+   `RepaintBoundary` around the text would contain the repaint, and later
+   that one above `SmartRefresher` would. Neither changed the numbers. A
+   per-render-object census of layouts and paints showed why: layout was
+   escaping past both boundaries, and every laid-out render object marks
+   itself for paint. The fix that worked made the refresher a relayout
+   boundary. Each attempt was a separate profile build, measured, and the
+   ones that did not help are reported above rather than dropped.
+9. **Toolchain drift.** The AI ran `flutter test` and `flutter run` with the
+   Flutter 3.44 on `PATH` instead of the pinned 3.27.0. `flutter test`
+   silently rewrote `pubspec.lock` with newer transitive packages, which
+   breaks the "do not upgrade" rule, and the profile build failed on a
+   Gradle version check. I reverted the lockfile and switched every run to
+   FVM's 3.27.0. The final test run is on 3.27.0.
 
 ---
 
@@ -371,8 +552,12 @@ value. Do not expose high-frequency values when the UI only needs a coarse
 fact: derive it in the controller (`offset > 800` → `RxBool`), because `Rx`
 does not notify when the value is set to the same thing. Values that change
 rarely (`isLoading`, a newly loaded page) can afford a wider scope. The same
-rule is why F-1's per-second countdown has to live in a `Text`-sized `Obx`,
-not around the card.
+rule is why F-1's per-second countdown lives in a `Text`-sized `Obx`, not
+around the card. F-1 also showed that a tight `Obx` limits only the *build*.
+A rebuilt `Text` can still trigger layout and paint far above it (here, all
+the way to the route, through `SmartRefresher`'s `LayoutBuilder`). So the
+scope of an update has to be checked in layout and paint as well as build,
+and fixed with relayout and repaint boundaries where needed.
 
 **Q3 — A test that would have caught RES-106.**
 `test/pickup_window_model_test.dart` builds the expected values from *local*
@@ -396,11 +581,9 @@ the controller that applies the filter.
 testing).
 
 **With one more day:**
-1. **F-1 (live countdowns)**: one shared 1-second ticker in a service. Each
-   card's countdown text listens to it through its own `Obx`, so only that
-   `Text` rebuilds. Expiry logic (disable the card, remove the deal from the
-   bag with a notice) lives in the service, so it also works for cards that
-   are off screen.
+1. **F-1 after device sleep:** observe the late expiry timers on a real
+   device (screen off long enough to suspend) to confirm the scenario the
+   resume re-check is built for.
 2. Reproduce RES-105's memory growth on a low-RAM device. I could not make
    it happen on the devices I had, so the memory explanation is unproven.
 3. Fix the `refreshDeals` error path (pull-to-refresh header stuck on failure).
