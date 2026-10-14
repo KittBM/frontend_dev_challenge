@@ -7,6 +7,7 @@ import '../../model/deal_model.dart';
 import '../../routes/routes.dart';
 import '../shared_widget/deal_card.dart';
 import '../shared_widget/shimmer_deal_card.dart';
+import '../shared_widget/track_impression.dart';
 import 'home_controller.dart';
 import 'widget/flash_deals_section.dart';
 
@@ -132,7 +133,12 @@ class HomeScreen extends GetView<HomeController> {
           ),
           SliverList.builder(
             itemCount: deals.length,
-            itemBuilder: (context, index) => DealCard(deal: deals[index]),
+            itemBuilder: (context, index) => TrackImpression(
+              dealId: deals[index].id,
+              source: 'home_feed',
+              position: index,
+              child: DealCard(deal: deals[index], source: 'home_feed'),
+            ),
           ),
           const SliverToBoxAdapter(child: SizedBox(height: 24)),
         ],

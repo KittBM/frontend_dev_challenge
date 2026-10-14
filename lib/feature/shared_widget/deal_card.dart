@@ -12,7 +12,7 @@ class DealCard extends StatelessWidget {
   final DealModel deal;
   final String source;
 
-  const DealCard({super.key, required this.deal, this.source = 'home'});
+  const DealCard({super.key, required this.deal, this.source = 'home_feed'});
 
   @override
   Widget build(BuildContext context) {

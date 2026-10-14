@@ -14,6 +14,7 @@ void main() {
   testWidgets('RES-105: scrolling the feed does not rebuild deal cards',
       (tester) async {
     final repo = FakeDealRepo();
+    putImpressionService();
     final controller = Get.put(HomeController(dealRepo: repo));
     await tester.pumpWidget(const GetMaterialApp(home: HomeScreen()));
     repo.pendingPages.removeAt(0).complete(PagedResponseModel(
