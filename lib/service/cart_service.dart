@@ -47,7 +47,7 @@ class CartService extends GetxService {
     }
   }
 
-  /// True while any hold is still being placed.
+  /// True while any hold is still being placed. Checkout waits for them.
   bool get isReserving => items.any((i) => i.isReserving);
 
   AddToCartResult add(DealModel deal) {
@@ -110,6 +110,25 @@ class CartService extends GetxService {
 
   num get total => items.fold(0, (sum, i) => sum + i.lineTotal);
 
+  /// Places fresh holds before checkout: on expired units only, or with
+  /// [all] on every held unit (after the backend rejected one we believed
+  /// valid). A new hold is placed before the old one is released, so a unit
+  /// is never left without one. Units that cannot be held again are removed
+  /// from the bag; their deals are returned.
+  Future<List<DealModel>> renewHolds({bool all = false}) async {
+    final now = _now();
+    final targets = [
+      for (final line in items)
+        for (final unit in line.units)
+          if (all ? !unit.isReserving : unit.isExpiredAt(now)) (line, unit),
+    ];
+    final lost = await Future.wait(targets.map((t) => _renewHold(t.$1, t.$2)));
+    return {
+      for (var i = 0; i < targets.length; i++)
+        if (lost[i]) targets[i].$1.deal,
+    }.toList();
+  }
+
   @override
   void onClose() {
     _resumeWorker?.dispose();
@@ -150,11 +169,33 @@ class CartService extends GetxService {
     }
   }
 
-  void _removeUnit(CartItemModel line, HeldUnit unit) {
+  /// Returns true if the unit could not be held again and was removed.
+  Future<bool> _renewHold(CartItemModel line, HeldUnit unit) async {
+    final old = unit.reservation;
+    try {
+      final fresh = await _orders.reserve(line.deal.id);
+      if (!_isInBag(unit)) {
+        _release(fresh.id);
+        return false;
+      }
+      unit.reservation = fresh;
+      items.refresh();
+      return false;
+    } catch (e) {
+      LogService.error('renewing hold on deal ${line.deal.id} failed', e);
+      if (!_isInBag(unit)) return false;
+      _removeUnit(line, unit, release: false);
+      return true;
+    } finally {
+      if (old != null) _release(old.id);
+    }
+  }
+
+  void _removeUnit(CartItemModel line, HeldUnit unit, {bool release = true}) {
     line.units.remove(unit);
     // A unit still being placed is released by _placeHold when it lands.
     final reservation = unit.reservation;
-    if (reservation != null) _release(reservation.id);
+    if (release && reservation != null) _release(reservation.id);
     if (line.units.isEmpty) {
       _expiryTimers.remove(line.deal.id)?.cancel();
       items.remove(line);

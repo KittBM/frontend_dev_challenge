@@ -17,6 +17,8 @@ void main() {
   late CartController controller;
 
   const contention = ApiException('someone grabbed it', statusCode: 409);
+  const expired = ApiException('Reservation expired', statusCode: 410);
+  const gateway = ApiException('Payment gateway timeout', statusCode: 502);
 
   List<String?> heldIds(int dealId) => [
         for (final u in cart.items.firstWhere((i) => i.deal.id == dealId).units)
@@ -175,6 +177,21 @@ void main() {
       await finish(tester);
     });
 
+    testWidgets('is not possible while a hold is still being placed',
+        (tester) async {
+      orders.holdReserves = true;
+      await pumpBag(tester);
+      cart.add(fakeDeal(1));
+      await tester.pump();
+
+      expect(find.text('Reserving…'), findsWidgets);
+      await controller.checkout();
+      expect(orders.checkouts, isEmpty);
+
+      orders.pendingReserves.single.complete(orders.newHold(1));
+      await finish(tester);
+    });
+
     testWidgets('an expired hold stays in the bag, marked, until checkout',
         (tester) async {
       await pumpBag(tester);
@@ -186,6 +203,80 @@ void main() {
 
       expect(cart.itemCount.value, 1);
       expect(find.textContaining('Hold expired'), findsOneWidget);
+      await finish(tester);
+    });
+
+    testWidgets('renews expired holds first, then checks out with them',
+        (tester) async {
+      await pumpBag(tester);
+      cart.add(fakeDeal(1));
+      await tester.pump();
+      now = now.add(const Duration(minutes: 6));
+
+      await controller.checkout();
+      await tester.pump();
+
+      expect(orders.checkouts.single.single['reservationId'], 'res_2');
+      expect(orders.released, ['res_1']);
+      await finish(tester);
+    });
+
+    testWidgets(
+        'stops without charging when an expired hold cannot be '
+        'renewed', (tester) async {
+      await pumpBag(tester);
+      cart.add(fakeDeal(1, name: 'Sushi Box'));
+      cart.add(fakeDeal(2));
+      await tester.pump();
+      now = now.add(const Duration(minutes: 6));
+      orders.reserveErrors.addAll([contention, null]);
+
+      await controller.checkout();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 500));
+
+      expect(orders.checkouts, isEmpty, reason: 'nothing is charged');
+      expect(cart.items.map((i) => i.deal.id), [2]);
+      expect(find.textContaining('Sushi Box'), findsWidgets);
+      expect(find.textContaining('tap Checkout again'), findsOneWidget);
+      await finish(tester);
+    });
+
+    testWidgets('a 410 renews every hold and asks the user to confirm again',
+        (tester) async {
+      await pumpBag(tester);
+      cart.add(fakeDeal(1));
+      await tester.pump();
+      orders.checkoutError = expired;
+
+      await controller.checkout();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 500));
+
+      expect(orders.checkouts, hasLength(1), reason: 'no automatic retry');
+      expect(heldIds(1), ['res_2']);
+      expect(orders.released, ['res_1']);
+      expect(find.text('Your hold ran out'), findsOneWidget);
+
+      await controller.checkout(); // the user taps again
+      expect(orders.checkouts.last.single['reservationId'], 'res_2');
+      expect(cart.items, isEmpty);
+      await finish(tester);
+    });
+
+    testWidgets('a 502 keeps the bag and its holds', (tester) async {
+      await pumpBag(tester);
+      cart.add(fakeDeal(1));
+      await tester.pump();
+      orders.checkoutError = gateway;
+
+      await controller.checkout();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 500));
+
+      expect(heldIds(1), ['res_1']);
+      expect(orders.released, isEmpty);
+      expect(find.text("Payment didn't go through"), findsOneWidget);
       await finish(tester);
     });
   });
