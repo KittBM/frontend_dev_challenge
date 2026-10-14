@@ -23,9 +23,11 @@ class AnalyticsEvent {
 class AnalyticsService extends GetxService {
   final events = <AnalyticsEvent>[].obs;
 
-  void logEvent(String name, [Map<String, dynamic> properties = const {}]) {
+  AnalyticsEvent logEvent(String name,
+      [Map<String, dynamic> properties = const {}]) {
     final event = AnalyticsEvent(name, properties);
     events.add(event);
     LogService.log('analytics: $name $properties');
+    return event;
   }
 }
