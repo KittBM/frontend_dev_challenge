@@ -16,16 +16,22 @@ class OrderRepo extends GetxService {
   }
 
   Future<OrderModel> checkout(List<CartItemModel> items) async {
-    final json = await api.checkout([
-      for (final item in items)
-        {
-          'dealId': item.deal.id,
-          'quantity': item.quantity,
-          'reservationId': item.reservation?.id,
-        }
-    ]);
+    final json = await api.checkout(checkoutItems(items));
     return OrderModel.fromJson(json);
   }
+
+  /// One checkout item per held unit: the API takes one reservation id per
+  /// item, and every unit in the bag has its own hold.
+  static List<Map<String, dynamic>> checkoutItems(List<CartItemModel> items) =>
+      [
+        for (final item in items)
+          for (final unit in item.units)
+            {
+              'dealId': item.deal.id,
+              'quantity': 1,
+              'reservationId': unit.reservation?.id,
+            }
+      ];
 
   Future<ReservationModel> reserve(int dealId, {int quantity = 1}) async {
     final json = await api.reserveDeal(dealId, quantity: quantity);
