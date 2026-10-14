@@ -59,7 +59,9 @@ void main() {
 
   group('CartService', () {
     test('refuses a flash deal whose sale has ended', () {
-      final cart = CartService(clock: ClockService(now: () => now));
+      final cart = CartService(
+          clock: ClockService(now: () => now),
+          orders: FakeOrderRepo(now: () => now));
       final deal = flashDeal(1, now.subtract(const Duration(seconds: 1)));
 
       expect(cart.add(deal), AddToCartResult.flashSaleEnded);
@@ -69,7 +71,9 @@ void main() {
     testWidgets('removes a flash deal from the bag when its sale ends',
         (tester) async {
       await tester.pumpWidget(const GetMaterialApp(home: Scaffold()));
-      final cart = CartService(clock: ClockService(now: () => now));
+      final cart = CartService(
+          clock: ClockService(now: () => now),
+          orders: FakeOrderRepo(now: () => now));
       cart.add(flashDeal(1, now.add(const Duration(seconds: 5))));
       cart.add(fakeDeal(2));
 
@@ -88,7 +92,9 @@ void main() {
     // testWidgets fails on any timer still pending when the test ends.
     testWidgets('removing a flash line cancels its expiry timer',
         (tester) async {
-      final cart = CartService(clock: ClockService(now: () => now));
+      final cart = CartService(
+          clock: ClockService(now: () => now),
+          orders: FakeOrderRepo(now: () => now));
       cart.add(flashDeal(1, now.add(const Duration(minutes: 1))));
       cart.add(flashDeal(2, now.add(const Duration(minutes: 1))));
       cart.decrement(1);
@@ -157,7 +163,8 @@ void main() {
         (tester) async {
       await tester.pumpWidget(const GetMaterialApp(home: Scaffold()));
       final clock = Get.put(ClockService(now: () => now));
-      final cart = Get.put(CartService(clock: clock));
+      final cart = Get.put(
+          CartService(clock: clock, orders: FakeOrderRepo(now: () => now)));
       cart.add(flashDeal(1, now.add(const Duration(minutes: 5))));
       cart.add(flashDeal(2, now.add(const Duration(minutes: 30))));
 

@@ -37,7 +37,7 @@ void main() {
   setUp(() {
     repo = FakeDealRepo();
     Get.put<DealRepo>(repo);
-    cart = Get.put(CartService());
+    cart = Get.put(CartService(orders: FakeOrderRepo()));
     Get.put(AnalyticsService());
   });
 

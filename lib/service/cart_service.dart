@@ -5,21 +5,27 @@ import 'package:get/get.dart';
 
 import '../model/cart_item_model.dart';
 import '../model/deal_model.dart';
+import '../repository/order_repo.dart';
 import '../util/log_service.dart';
+import 'api_exception.dart';
 import 'clock_service.dart';
 
 enum AddToCartResult { added, flashSaleEnded, noStockLeft }
 
-/// App-wide cart. Lives for the whole session.
+/// App-wide bag. Lives for the whole session.
 ///
-/// NOTE: the starter cart is purely local — it does not reserve stock on the
-/// backend. See the "Reservations" feature task in PROBLEM.md.
+/// Every unit in the bag holds stock on the backend through its own
+/// reservation (see [HeldUnit]). Adding is optimistic: the unit shows up at
+/// once and its hold is placed in the background; if the backend refuses,
+/// the unit is rolled back with a notice.
 class CartService extends GetxService {
-  CartService({ClockService? clock})
+  CartService({ClockService? clock, required OrderRepo orders})
       : _clock = clock,
+        _orders = orders,
         _now = clock?.now ?? DateTime.now;
 
   final ClockService? _clock;
+  final OrderRepo _orders;
   final DateTime Function() _now;
 
   final items = <CartItemModel>[].obs;
@@ -41,45 +47,58 @@ class CartService extends GetxService {
     }
   }
 
+  /// True while any hold is still being placed.
+  bool get isReserving => items.any((i) => i.isReserving);
+
   AddToCartResult add(DealModel deal) {
     if (deal.isFlashSaleOver(_now())) {
       LogService.log('cart: flash sale for deal ${deal.id} has ended');
       return AddToCartResult.flashSaleEnded;
     }
-    final existing = items.firstWhereOrNull((i) => i.deal.id == deal.id);
-    if (existing != null) {
-      if (existing.quantity >= deal.quantityLeft) {
-        LogService.log('cart: cannot add more of deal ${deal.id}');
-        return AddToCartResult.noStockLeft;
-      }
-      existing.quantity++;
-      items.refresh();
-    } else {
-      items.add(CartItemModel(deal: deal));
+    var line = items.firstWhereOrNull((i) => i.deal.id == deal.id);
+    if ((line?.quantity ?? 0) >= deal.quantityLeft) {
+      LogService.log('cart: cannot add more of deal ${deal.id}');
+      return AddToCartResult.noStockLeft;
+    }
+    if (line == null) {
+      line = CartItemModel(deal: deal);
+      items.add(line);
       _watchFlashSale(deal);
     }
+    final unit = HeldUnit();
+    line.units.add(unit);
+    items.refresh();
     _recount();
+    _placeHold(line, unit);
     return AddToCartResult.added;
   }
 
+  /// Removes one unit, choosing the one worth least: an expired hold first,
+  /// then one still being placed, then the hold that runs out soonest.
   void decrement(int dealId) {
-    final existing = items.firstWhereOrNull((i) => i.deal.id == dealId);
-    if (existing == null) return;
-    existing.quantity--;
-    if (existing.quantity <= 0) {
-      remove(dealId);
-    } else {
-      items.refresh();
-      _recount();
-    }
+    final line = items.firstWhereOrNull((i) => i.deal.id == dealId);
+    if (line == null || line.units.isEmpty) return;
+    final now = _now();
+    int rank(HeldUnit u) => u.isExpiredAt(now) ? 0 : (u.isReserving ? 1 : 2);
+    final unit = line.units.reduce((a, b) {
+      final byRank = rank(a).compareTo(rank(b));
+      if (byRank != 0) return byRank < 0 ? a : b;
+      final ea = a.reservation?.expiresAt, eb = b.reservation?.expiresAt;
+      return (ea != null && eb != null && eb.isBefore(ea)) ? b : a;
+    });
+    _removeUnit(line, unit);
   }
 
   void remove(int dealId) {
-    _expiryTimers.remove(dealId)?.cancel();
-    items.removeWhere((i) => i.deal.id == dealId);
-    _recount();
+    final line = items.firstWhereOrNull((i) => i.deal.id == dealId);
+    if (line == null) return;
+    for (final unit in List.of(line.units)) {
+      _removeUnit(line, unit);
+    }
   }
 
+  /// Empties the bag after a successful checkout. The order used the holds,
+  /// so they are not released.
   void clear() {
     for (final timer in _expiryTimers.values) {
       timer.cancel();
@@ -102,6 +121,68 @@ class CartService extends GetxService {
 
   void _recount() {
     itemCount.value = items.fold(0, (sum, i) => sum + i.quantity);
+  }
+
+  bool _isInBag(HeldUnit unit) => items.any((l) => l.units.contains(unit));
+
+  Future<void> _placeHold(CartItemModel line, HeldUnit unit) async {
+    try {
+      final reservation = await _orders.reserve(line.deal.id);
+      if (!_isInBag(unit)) {
+        // Removed while the hold was being placed: don't keep stock from
+        // other users for a unit nobody wants.
+        _release(reservation.id);
+        return;
+      }
+      unit.reservation = reservation;
+      items.refresh();
+    } catch (e) {
+      LogService.error('reserving deal ${line.deal.id} failed', e);
+      if (!_isInBag(unit)) return;
+      _removeUnit(line, unit);
+      _notify(
+        "Couldn't add ${line.deal.name}",
+        _isContention(e)
+            ? 'Someone just took the last one, so it was taken out of your bag.'
+            : "We couldn't hold it for you right now, so it was taken out of "
+                'your bag. Please try again.',
+      );
+    }
+  }
+
+  void _removeUnit(CartItemModel line, HeldUnit unit) {
+    line.units.remove(unit);
+    // A unit still being placed is released by _placeHold when it lands.
+    final reservation = unit.reservation;
+    if (reservation != null) _release(reservation.id);
+    if (line.units.isEmpty) {
+      _expiryTimers.remove(line.deal.id)?.cancel();
+      items.remove(line);
+    } else {
+      items.refresh();
+    }
+    _recount();
+  }
+
+  /// Fire and forget: if a release fails, the hold still expires on its own
+  /// after 5 minutes.
+  void _release(String reservationId) {
+    _orders.releaseReservation(reservationId).catchError((Object e) {
+      LogService.error('releasing $reservationId failed', e);
+    });
+  }
+
+  static bool _isContention(Object e) =>
+      e is ApiException && e.statusCode == 409;
+
+  void _notify(String title, String message) {
+    Get.closeAllSnackbars();
+    Get.snackbar(
+      title,
+      message,
+      snackPosition: SnackPosition.BOTTOM,
+      duration: const Duration(seconds: 4),
+    );
   }
 
   void _watchFlashSale(DealModel deal) {

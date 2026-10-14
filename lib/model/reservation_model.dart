@@ -22,5 +22,7 @@ class ReservationModel {
     );
   }
 
-  bool get isExpired => DateTime.now().toUtc().isAfter(expiresAt);
+  /// Takes the time from the caller (ClockService) so it can be tested and
+  /// stays consistent with the countdown shown in the bag.
+  bool isExpiredAt(DateTime now) => !now.isBefore(expiresAt);
 }

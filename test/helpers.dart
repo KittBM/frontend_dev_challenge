@@ -3,10 +3,14 @@ import 'dart:math';
 
 import 'package:get/get.dart';
 
+import 'package:rescu/model/cart_item_model.dart';
 import 'package:rescu/model/deal_model.dart';
+import 'package:rescu/model/order_model.dart';
 import 'package:rescu/model/paged_response_model.dart';
 import 'package:rescu/model/pickup_window_model.dart';
+import 'package:rescu/model/reservation_model.dart';
 import 'package:rescu/repository/deal_repo.dart';
+import 'package:rescu/repository/order_repo.dart';
 import 'package:rescu/service/analytics_service.dart';
 import 'package:rescu/service/fake_api_service.dart';
 import 'package:rescu/service/impression_service.dart';
@@ -90,4 +94,74 @@ ImpressionService putImpressionService(
     analytics: analytics,
     send: (events) async => sentBatches?.add(events),
   ));
+}
+
+/// OrderRepo whose reservations and checkout are scripted by the test.
+class FakeOrderRepo extends OrderRepo {
+  FakeOrderRepo({DateTime Function()? now})
+      : _now = now ?? DateTime.now,
+        super(api: FakeApiService());
+
+  final DateTime Function() _now;
+  final reserveCalls = <int>[];
+  final released = <String>[];
+  final checkouts = <List<Map<String, dynamic>>>[];
+  int _seq = 0;
+
+  /// When true, reserve() waits until the test completes [pendingReserves].
+  bool holdReserves = false;
+  final pendingReserves = <Completer<ReservationModel>>[];
+
+  /// Errors thrown by the next reserve() calls, in order (null = succeed).
+  final reserveErrors = <Object?>[];
+
+  /// Error thrown by the next checkout() (null = succeed).
+  Object? checkoutError;
+
+  ReservationModel newHold(int dealId) => ReservationModel(
+        id: 'res_${++_seq}',
+        dealId: dealId,
+        quantity: 1,
+        expiresAt: _now().add(const Duration(minutes: 5)),
+      );
+
+  @override
+  Future<ReservationModel> reserve(int dealId, {int quantity = 1}) async {
+    reserveCalls.add(dealId);
+    if (holdReserves) {
+      final c = Completer<ReservationModel>();
+      pendingReserves.add(c);
+      return c.future;
+    }
+    if (reserveErrors.isNotEmpty) {
+      final error = reserveErrors.removeAt(0);
+      if (error != null) throw error;
+    }
+    return newHold(dealId);
+  }
+
+  @override
+  Future<void> releaseReservation(String reservationId) async =>
+      released.add(reservationId);
+
+  @override
+  Future<OrderModel> checkout(List<CartItemModel> items) async {
+    checkouts.add(OrderRepo.checkoutItems(items));
+    final error = checkoutError;
+    checkoutError = null;
+    if (error != null) throw error;
+    return OrderModel(
+      id: 9100 + checkouts.length,
+      dealId: items.first.deal.id,
+      dealName: 'order',
+      storeName: 'store',
+      imageUrl: '',
+      status: 'CONFIRMED',
+      quantity: items.fold(0, (n, i) => n + i.quantity),
+      total: 0,
+      currencyCode: 'THB',
+      pickupStart: _now(),
+      pickupEnd: _now(),
+    );
+  }
 }
