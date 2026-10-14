@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
+import 'package:visibility_detector/visibility_detector.dart';
 
 import 'app_config.dart';
 import 'repository/deal_repo.dart';
@@ -10,6 +11,7 @@ import 'service/analytics_service.dart';
 import 'service/cart_service.dart';
 import 'service/clock_service.dart';
 import 'service/fake_api_service.dart';
+import 'service/impression_service.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -22,6 +24,18 @@ Future<void> initDependencies() async {
   Get.put(AnalyticsService(), permanent: true);
   final clock = Get.put(ClockService(), permanent: true);
   Get.put(CartService(clock: clock), permanent: true);
+  Get.put(
+    ImpressionService(
+      analytics: Get.find(),
+      send: Get.find<FakeApiService>().sendAnalyticsBatch,
+    ),
+    permanent: true,
+  );
+  // The default 500 ms batching of visibility checks would blur the
+  // "visible for one continuous second" rule by up to half a second either
+  // way; 100 ms keeps it tight at a negligible cost.
+  VisibilityDetectorController.instance.updateInterval =
+      const Duration(milliseconds: 100);
   Get.lazyPut(() => DealRepo(api: Get.find()), fenix: true);
   Get.lazyPut(() => StoreRepo(api: Get.find()), fenix: true);
   Get.lazyPut(() => OrderRepo(api: Get.find()), fenix: true);

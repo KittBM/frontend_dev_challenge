@@ -1,11 +1,16 @@
 import 'dart:async';
 import 'dart:math';
 
+import 'package:get/get.dart';
+
 import 'package:rescu/model/deal_model.dart';
 import 'package:rescu/model/paged_response_model.dart';
 import 'package:rescu/model/pickup_window_model.dart';
 import 'package:rescu/repository/deal_repo.dart';
+import 'package:rescu/service/analytics_service.dart';
 import 'package:rescu/service/fake_api_service.dart';
+import 'package:rescu/service/impression_service.dart';
+import 'package:visibility_detector/visibility_detector.dart';
 
 DealModel fakeDeal(int id, {String? name}) => DealModel(
       id: id,
@@ -69,4 +74,20 @@ class FakeDealRepo extends DealRepo {
     await Future.delayed(Duration(milliseconds: ms));
     return [fakeDeal(1, name: 'result for "$query"')];
   }
+}
+
+/// Registers impression tracking for screens that use TrackImpression.
+/// Batches are captured in [sentBatches] instead of being sent.
+ImpressionService putImpressionService(
+    {List<List<Map<String, dynamic>>>? sentBatches}) {
+  // Report visibility at the end of each frame instead of on a 500 ms timer,
+  // so tests are deterministic and leave no timer pending.
+  VisibilityDetectorController.instance.updateInterval = Duration.zero;
+  final analytics = Get.isRegistered<AnalyticsService>()
+      ? Get.find<AnalyticsService>()
+      : Get.put(AnalyticsService());
+  return Get.put(ImpressionService(
+    analytics: analytics,
+    send: (events) async => sentBatches?.add(events),
+  ));
 }

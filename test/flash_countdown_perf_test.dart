@@ -7,6 +7,7 @@ import 'package:rescu/feature/shared_widget/flash_countdown.dart';
 import 'package:rescu/service/clock_service.dart';
 
 import 'flash_countdown_test.dart' show flashDeal;
+import 'helpers.dart';
 
 /// F-1 performance budget: a clock tick may rebuild only the countdown text,
 /// never the cards or the list around it.
@@ -44,6 +45,7 @@ void main() {
     addTearDown(tester.view.reset);
 
     final clock = Get.put(ClockService(now: () => now));
+    final impressions = putImpressionService();
     final railDeals = [
       for (var i = 0; i < 10; i++)
         flashDeal(1000 + i, now.add(Duration(minutes: 30 + i))),
@@ -98,6 +100,7 @@ void main() {
         reason: 'a tick may rebuild only the countdown text');
 
     clock.onClose();
+    impressions.onClose();
   });
 
   testWidgets('an expiring deal rebuilds its own card once, not its neighbours',
@@ -107,6 +110,7 @@ void main() {
     addTearDown(tester.view.reset);
 
     final clock = Get.put(ClockService(now: () => now));
+    final impressions = putImpressionService();
     final deals = [
       flashDeal(1, now.add(const Duration(minutes: 5))),
       flashDeal(2, now.add(const Duration(seconds: 2))), // expires first
@@ -131,11 +135,13 @@ void main() {
     expect(find.text('EXPIRED'), findsOneWidget);
 
     clock.onClose();
+    impressions.onClose();
   });
 
   testWidgets('countdowns on a covered route stop ticking until uncovered',
       (tester) async {
     final clock = Get.put(ClockService(now: () => now));
+    final impressions = putImpressionService();
     final deal = flashDeal(1, now.add(const Duration(minutes: 5)));
     final navigator = GlobalKey<NavigatorState>();
     // Image placeholders shimmer forever, so pumpAndSettle never settles.
@@ -169,5 +175,6 @@ void main() {
     expect(find.text('04:56'), findsOneWidget, reason: 'ticking again');
 
     clock.onClose();
+    impressions.onClose();
   });
 }

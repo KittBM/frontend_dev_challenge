@@ -1,8 +1,8 @@
 # Rescu — Solutions
 
 All seven Part A tickets are fixed on this branch. In Part B, F-1 (live
-flash-sale countdowns) is done and profiled on a device; F-2 and F-3 were not
-started. See [What's next](#time-spent-and-whats-next).
+flash-sale countdowns) and F-2 (impression tracking) are done and profiled on
+a device; F-3 was not started. See [What's next](#time-spent-and-whats-next).
 
 Every fix has a regression test under `test/`. I ran each test against the
 code before its fix to check that it actually fails there. A few are guards
@@ -448,6 +448,128 @@ p90 3.9 / p99 6.0 ms. This is a few seconds of manual scrolling, read from
 the timeline ring buffer (~17 s window), not the scripted A-B-B-A run used
 for RES-105. It shows there is no regression, not a precise comparison.
 
+### F-2 · Impression tracking
+
+**Design.** Three pieces, split by responsibility:
+
+1. **`TrackImpression` decides when a card counts as seen.** It wraps a
+   card where it is placed in a list (feed, flash rail, search), because
+   only the list knows the card's `position`. It uses `visibility_detector`.
+   When the card reaches ≥ 50% visible it starts a one-second timer; any
+   drop below 50% cancels the timer, so the second has to be continuous.
+   Visibility callbacks only start or cancel that timer and never call
+   `setState`, so tracking adds no rebuilds to scrolling. The callback is a
+   method tear-off rather than a closure: the detector compares callbacks on
+   every rebuild, and a new closure each time would make it repaint and
+   re-check the card.
+2. **`ImpressionService` enforces "once per deal per session".** It is a
+   permanent service holding the set of deal ids already reported, so the
+   same deal seen in the rail and then in the feed, or again after leaving
+   and re-opening search, is reported once. It logs the event to
+   `AnalyticsService`, so it shows on the Analytics debug screen, and hands
+   it to the batcher.
+3. **`AnalyticsBatcher` delivers in batches.** It sends as soon as 10 events
+   are queued, or 15 s after the *oldest* unsent event. That deadline is set
+   by the first event and never pushed back by later ones, otherwise a
+   steady trickle would never be sent. It sends what was queued when the
+   flush started. Events that arrive while a batch is in flight wait for
+   their own trigger instead of being swept into an early second send. The
+   Analytics debug screen now shows "Impressions waiting / Batches sent".
+
+**Decisions.**
+- **`visibility_detector`, not a home-made viewport calculation.** In 0.4 it
+  observes composition callbacks instead of inserting layers, so it does not
+  undo the F-1 repaint boundaries. Computing visibility from scroll offsets
+  would need the height of every card and would break for the horizontal
+  rail inside a vertical list.
+- **Detector interval 100 ms instead of the default 500 ms.** The default
+  batches visibility checks every 500 ms, which blurs "one continuous
+  second" by up to ±0.5 s. A card on screen for 0.6 s could count.
+  Measured cost: below.
+- **`source` for the feed is now `home_feed`**, matching the spec. `DealCard`
+  also uses it for `deal_details_view`, which used to say `home`. Keeping
+  the same value in both events lets impressions and detail views be joined
+  into a funnel.
+- **`position` is the index in the list as displayed.** With "Pickup today"
+  on, that is the index in the filtered list, because that is where the user
+  saw the card.
+- **Expired flash deals still count.** An impression records what was
+  seen, and they are still on screen.
+- **Failed batches are retried.** The batch goes back to the front of the
+  queue, in order, and is retried after another 15 s, not immediately in a
+  loop. The fake backend never fails, but a real one does.
+- **Flush on background.** When the app is paused, everything queued is sent
+  at once. The OS can kill a backgrounded app without warning, and waiting
+  out the 15 s deadline would lose those events.
+
+**Rejected alternatives.**
+- **Batching inside `AnalyticsService` for every event.** `screen_view` and
+  `deal_details_view` would then count toward the 10-event limit, and the
+  impression batches the spec describes would contain other events. Those
+  events were never uploaded before, and changing that is outside this task.
+- **A `TickerMode` check for covered routes** (the F-1 approach). I wrote
+  it, and a mutation test showed it was redundant. `Layer` composition
+  callbacks also fire when a layer is detached (Flutter 3.27 docs), so the
+  detector already reports a covered route as 0% visible. I removed the
+  check and kept the test as a guard.
+
+**Edge cases.**
+- Covered by another route (deal page, Analytics debug): not visible.
+  Covered by a dialog or bottom sheet, which are not opaque routes: still
+  counts as visible.
+- A card scrolled away and back within the second starts a new second.
+- Recycled list items: the detector key includes source and deal id, so an
+  item reused for a different deal reports afresh.
+- *Not handled:* a card that becomes visible less than a second before the
+  app goes to the background can still be counted once its timer fires.
+- *Not handled:* the queue is in memory. Events not yet sent are lost if the
+  process is killed before the background flush completes. Persisting the
+  queue would fix that.
+- *Not handled:* the "seen" set resets on a cold start. That is what "per
+  app session" asks for.
+
+**Evidence.** Tests (`test/impression_tracking_test.dart`,
+`test/analytics_batcher_test.dart`) cover: the 50% threshold (a card 40%
+visible never counts), the continuous second (scrolling away at 0.6 s and
+back restarts it), once per deal across two lists showing the same deal, a
+covered route, batches of 10 with the payload shape, the 15 s deadline not
+moving with later events, in-flight events waiting for their own trigger,
+and retry order after a failure. I mutated the code to check that the tests
+catch real bugs. Removing the de-duplication, lowering the threshold to 40%,
+and sending one by one each fail tests. Removing the `TickerMode` check
+did not, which is how I found it was redundant.
+
+On the device (Galaxy S22+, Flutter 3.27.0, profile mode), the console
+showed the first batch go out 15.3 s after the first impression (15 s plus
+the fake API latency), with 9 events. Deal 1 sits in both the rail and the
+feed and was reported once. The debug screen listed the 9 events and
+"Batches sent: 1".
+
+Scroll performance, A-B-B-A against `main` (F-1 only). Each run: phone
+cooled to thermal status 0 and below 36.5 °C, the same scripted
+`adb input swipe` sequence (15 flings down the feed and 15 back up, ~32 s),
+and a timeline polled every 1.5 s so every frame is captured. ~2,750 frames
+per run, 120 Hz, 8.36 ms budget:
+
+| | `main` run 1 | F-2 run 1 | F-2 run 2 | `main` run 2 |
+|---|---|---|---|---|
+| UI p50 / p90 / p99 (ms) | 2.67 / 3.89 / 5.47 | 2.78 / 3.90 / 5.51 | 2.76 / 3.83 / 5.29 | 2.71 / 3.88 / 5.58 |
+| Raster p90 / p99 (ms) | 4.12 / 5.31 | 4.13 / 5.47 | 4.11 / 5.24 | 4.13 / 5.26 |
+| Frames over budget (UI / raster) | 0 / 3 | 3 / 8 | 2 / 4 | 2 / 5 |
+
+p90 and p99 are the same within run-to-run noise, and janky frames stay at
+0.1–0.3% on both builds. The median UI time is ~0.08 ms (~3%) higher with
+tracking, which matches the extra visibility checks. On an idle home
+screen, each F-1 countdown tick now also triggers one visibility check
+(every composite fires the detectors' callbacks). That check runs 100 ms
+after the frame, outside it, and takes 0.26 ms on average.
+
+A measurement trap is worth recording here. Polling the ring buffer
+sometimes loses events between polls, and pairing a frame's begin with an
+end that belongs to a later frame produced "frames" of 1–6 s. The analysis
+now pairs only adjacent begin/end events and drops the 1–5 pairs per run
+that span lost data.
+
 ---
 
 ## AI usage log
@@ -521,6 +643,25 @@ against the code and a failing test before changing anything.
    breaks the "do not upgrade" rule, and the profile build failed on a
    Gradle version check. I reverted the lockfile and switched every run to
    FVM's 3.27.0. The final test run is on 3.27.0.
+10. **F-2: a batcher that sent too early.** The AI's first `flush()` looped
+    "while the queue is not empty". Events that arrived while a batch was in
+    flight were swept into an immediate second send, so 2 events could go
+    out after 1 s, breaking both triggers. I caught it in review: the loop
+    re-reads a queue that `add` keeps filling. `flush` now sends only what
+    was queued when it started, and a test holds a batch in flight to prove
+    it.
+11. **F-2: redundant code that every test passed.** The AI added a
+    `TickerMode` check to stop counting on covered routes, by analogy with
+    F-1. All tests passed, and they still passed with the check removed. A
+    mutation run exposed this. The Flutter source showed that composition
+    callbacks fire on detach, so the detector already handles it. I removed
+    the code instead of keeping something I could not justify.
+12. **F-2: "frames" of six seconds.** The first A-B-B-A analysis showed UI
+    frames of up to 6.5 s, which would have suggested F-2 caused freezes. No
+    freeze was visible, begin/end counts did not match, and the timeline had
+    holes between polls. The pairing was inventing frames across lost data.
+    I fixed the analysis rather than the app, and report how many pairs were
+    dropped.
 
 ---
 
@@ -589,4 +730,7 @@ testing).
 3. Fix the `refreshDeals` error path (pull-to-refresh header stuck on failure).
 4. Handle a failed RES-107 fetch or a malformed link (missing or
    non-numeric `id`) instead of leaving the spinner up.
-5. Then F-2, then F-3.
+5. **F-2:** persist the unsent impression queue so a killed process does
+   not lose it, and decide with product whether `screen_view` and
+   `deal_details_view` should be uploaded through the same batcher.
+6. Then F-3.
