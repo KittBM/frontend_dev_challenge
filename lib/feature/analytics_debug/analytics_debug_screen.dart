@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 
 import '../../service/analytics_service.dart';
+import '../../service/impression_service.dart';
 
 /// Developer screen: shows every analytics event recorded this session.
 /// Useful for verifying the impression-tracking feature task.
@@ -11,8 +12,23 @@ class AnalyticsDebugScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final analytics = Get.find<AnalyticsService>();
+    final batcher = Get.find<ImpressionService>().batcher;
     return Scaffold(
-      appBar: AppBar(title: const Text('Analytics debug')),
+      appBar: AppBar(
+        title: const Text('Analytics debug'),
+        // Delivery state of deal_impression batches (POST /analytics/batch).
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(28),
+          child: Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Obx(() => Text(
+                  'Impressions waiting: ${batcher.queued.value}'
+                  '  ·  Batches sent: ${batcher.batchesSent.value}',
+                  style: TextStyle(fontSize: 13, color: Colors.grey.shade700),
+                )),
+          ),
+        ),
+      ),
       body: Obx(() {
         final events = analytics.events.reversed.toList();
         if (events.isEmpty) {
