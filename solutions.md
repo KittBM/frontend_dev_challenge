@@ -1,8 +1,10 @@
 # Rescu — Solutions
 
-All seven Part A tickets are fixed on this branch. In Part B, F-1 (live
-flash-sale countdowns) and F-2 (impression tracking) are done and profiled on
-a device; F-3 was not started. See [What's next](#time-spent-and-whats-next).
+All seven Part A tickets are fixed on this branch. All three Part B
+features are done: F-1 (live flash-sale countdowns) and F-2 (impression
+tracking) are profiled on a device, and F-3 (stock reservations) is tested on
+a device against the simulated backend. See
+[What's next](#time-spent-and-whats-next).
 
 Every fix has a regression test under `test/`. I ran each test against the
 code before its fix to check that it actually fails there. A few are guards
@@ -570,6 +572,136 @@ end that belongs to a later frame produced "frames" of 1–6 s. The analysis
 now pairs only adjacent begin/end events and drops the 1–5 pairs per run
 that span lost data.
 
+### F-3 · Stock reservations with optimistic UI
+
+**What the backend allows.** `reserveDeal` holds stock for 5 minutes and
+returns an id, a quantity and `expiresAt`. A hold's quantity cannot be
+changed afterwards, and there is no way to ask which of several holds is
+still valid. `checkout` takes one reservation id per item and answers 410
+for an expired or unknown one. Every fifth mutation fails: reserve with 409,
+checkout with 502. Reserve and checkout share that counter.
+
+**Decision 1: one hold per unit, not one per line.** Each unit in the bag
+has its own reservation (`HeldUnit`). Adding one more places one more hold.
+Removing one releases exactly that hold, which cannot fail. Checkout sends
+one item per unit, each with its own id, which the API already accepts.
+
+The alternative was one hold per line, swapped on every quantity change:
+reserve the new quantity, then release the old hold. I rejected it for
+three reasons:
+- Reducing the quantity would need a new reservation, so it could fail
+  with 409. "You can't remove that" is nonsense to a user.
+- Every change would restart the 5-minute timer for the whole line.
+- Releasing first would leave a window with no hold at all.
+
+The costs of per-unit holds are more requests and a line that shows the
+expiry of its soonest hold.
+
+**Decision 2: an expired hold stays in the bag and is renewed at checkout.**
+When a hold expires while the user is in the app, the line stays in the bag,
+marked "Hold expired — we'll try to reserve it again at checkout". Tapping
+Checkout first places fresh holds on every expired unit, and only then
+charges. If a unit cannot be held again, checkout stops before charging
+anything, that unit leaves the bag, and the user is told which deal is gone
+and asked to review the bag and tap again.
+
+Mid-checkout, a 410 means a hold we thought valid was rejected: it expired
+while the request was in flight, or the device clock disagrees with the
+server. The 410 does not say which hold, so every unit gets a fresh hold,
+each placed before the old one is released, so no unit is ever without
+one. The user is then asked to tap Checkout again. There is no automatic
+payment retry.
+
+Why this and not the alternatives:
+- **Renewing holds silently in the background** keeps stock away from
+  other users indefinitely. That defeats the 5-minute hold, whose purpose
+  is to stop someone who left the app from blocking a bag. This is one of
+  the wrong answers.
+- **Removing expired lines** throws away the user's choices, often while the
+  stock is still there. It is safe but hostile.
+- **A "Reserve again" button per line** works, but it asks the user to
+  manage something they don't care about. Tapping Checkout already says "I
+  want these now", which is exactly when a hold matters.
+- **Charging after a 410 without asking** pays for a bag the user has not
+  seen since the problem. One extra tap is cheap; a surprise charge is not.
+
+**The rest of the flow.**
+- **Optimistic add.** `add()` puts a unit in the bag at once, shown as
+  "Reserving…", and places its hold in the background. On a 409 the unit is
+  rolled back with "Someone just took the last one, so it was taken out of
+  your bag". Other failures get "We couldn't hold it for you right now".
+  The status code never reaches the user. Only the failed unit is removed,
+  not the whole line.
+- **Each line shows its hold:** "Held for 04:12", in orange under a minute,
+  or the expired message. It rebuilds every second, so as in F-1 the `Obx`
+  covers only that row of text.
+- **Checkout waits for holds still being placed.** The button reads
+  "Reserving…" and is disabled, and +/− are disabled while checking out, so
+  the order cannot change under the request.
+- **502 keeps the bag and its holds** and says the user wasn't charged
+  (the backend says so too).
+- **F-1 integration.** A line removed because its flash sale ended releases
+  its holds. Expiry uses `ClockService`, so it is testable and correct after
+  the device sleeps. `ReservationModel.isExpired`, which read
+  `DateTime.now()` directly, became `isExpiredAt(now)`.
+
+**Edge cases.**
+- **Removed while the hold is being placed.** When the reservation arrives
+  it is released immediately, so no stock is held for a unit nobody wants.
+- **Rapid taps.** Each tap is an independent unit with its own request, so
+  out-of-order answers cannot mix up holds. The local stock limit counts
+  units still being reserved.
+- **Releases are fire-and-forget.** If one fails, the hold still expires on
+  the server within 5 minutes. Failures are logged.
+- **Decrement drops the least valuable unit:** an expired one first, then
+  one still being placed, then the hold that runs out soonest.
+- **Partial renewal.** When some units of a line cannot be renewed, those
+  units are removed and the message names the deal. It does not say how
+  many units of that deal were lost.
+- *Not handled:* no warning before a hold expires (only the orange
+  countdown), and the bag itself is in memory, so it is lost when the
+  process dies. Holds left behind expire on their own.
+- *Backend note:* the fake `reserveDeal` checks `quantityLeft` but does not
+  decrement it, so holds do not really reduce stock in this simulation. The
+  client code does not depend on that.
+
+**Evidence.** `test/reservation_test.dart` has 14 tests:
+- the optimistic add, a 409 rollback, and a rollback that removes only the
+  failed unit;
+- releasing a hold that lands after its unit was removed;
+- decrement choosing the soonest hold;
+- releasing every hold when a line is removed;
+- the checkout payload (one item per unit) and checkout blocked while a
+  hold is being placed;
+- an expired line kept and marked, renewal before checkout, and stopping
+  without a charge when renewal fails;
+- a 410 renewing everything without retrying payment, and a 502 keeping
+  the bag.
+
+Six mutations were each caught:
+- keeping orphan holds;
+- decrement ignoring expiry (this one first passed, because the soonest
+  hold happened to be first in the test; the test now orders them the
+  other way);
+- never renewing;
+- retrying payment after a 410;
+- one checkout item per line;
+- no rollback on a 409.
+
+On the device (Galaxy S22+, profile build, the simulated backend), the app
+log showed:
+
+| Step | Requests |
+|---|---|
+| Add a deal 3 times | 2 holds placed; the 3rd hit the scripted 409 and only that unit was rolled back |
+| Add once more, check out | `POST /checkout items=3`, one per unit, no releases (the order used the holds) |
+| Leave a unit 6 min, check out | new hold placed, then the expired one released (`DELETE res_4`), then checkout, which hit the scripted 502 |
+| Tap Checkout again | checkout succeeded with the renewed hold and no extra reservation |
+
+The 410 path is covered by the widget test only. The simulated backend
+produces it only when a hold expires while the checkout request is in
+flight.
+
 ---
 
 ## AI usage log
@@ -662,6 +794,17 @@ against the code and a failing test before changing anything.
     holes between polls. The pairing was inventing frames across lost data.
     I fixed the analysis rather than the app, and report how many pairs were
     dropped.
+13. **F-3: a disabled button that would not have disabled.** The AI read
+    `isCheckingOut.value` inside a `ListView.builder` `itemBuilder` to
+    disable the bag's +/− buttons during checkout. The code compiled and
+    looked right, but `itemBuilder` runs later, during layout, outside the
+    `Obx` that was supposed to track the read. So the buttons would never
+    have updated. I caught it in review and now read the value at the top
+    of the `Obx` builder.
+14. **F-3: a passing test that proved nothing.** The decrement test checked
+    that the soonest-expiring hold is released, but that hold was also the
+    first unit. "Always drop the first unit" passed too. A mutation run
+    found it, and the test now puts the soonest hold second.
 
 ---
 
@@ -718,8 +861,8 @@ the controller that applies the filter.
 
 ## Time spent and what's next
 
-**Time spent:** TODO: roughly __ hours (honest total, including reading and
-testing).
+**Time spent:** roughly 18 hours in total, including reading the code,
+writing tests, profiling on devices and writing this document.
 
 **With one more day:**
 1. **F-1 after device sleep:** observe the late expiry timers on a real
@@ -733,4 +876,7 @@ testing).
 5. **F-2:** persist the unsent impression queue so a killed process does
    not lose it, and decide with product whether `screen_view` and
    `deal_details_view` should be uploaded through the same batcher.
-6. Then F-3.
+6. **F-3:** warn a minute before a hold expires instead of only turning the
+   countdown orange; say how many units were lost when a renewal partly
+   fails; persist the bag so a restart does not drop it while holds are
+   still live.
